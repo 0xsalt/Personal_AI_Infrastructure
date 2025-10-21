@@ -79,8 +79,8 @@ ask_yes_no() {
     fi
 
     while true; do
-        echo -n -e "${CYAN}${THINKING} $question $prompt: ${NC}"
-        read -r response
+        printf "${CYAN}${THINKING} %s %s: ${NC}" "$question" "$prompt" >/dev/tty
+        read -r response </dev/tty
         response=${response:-$default}
         case "$response" in
             [Yy]* ) return 0;;
@@ -96,12 +96,12 @@ ask_input() {
     local response
 
     if [ -n "$default" ]; then
-        echo -n -e "${CYAN}${THINKING} $question [$default]: ${NC}"
+        printf "${CYAN}${THINKING} %s [%s]: ${NC}" "$question" "$default" >/dev/tty
     else
-        echo -n -e "${CYAN}${THINKING} $question: ${NC}"
+        printf "${CYAN}${THINKING} %s: ${NC}" "$question" >/dev/tty
     fi
 
-    read -r response
+    read -r response </dev/tty
     echo "${response:-$default}"
 }
 
@@ -154,11 +154,13 @@ print_step "Checking for macOS..."
 if [[ "$OSTYPE" == "darwin"* ]]; then
     macos_version=$(sw_vers -productVersion)
     print_success "Running macOS $macos_version"
+    IS_MACOS=true
 else
     print_warning "This script is designed for macOS. You're running: $OSTYPE"
-    if ! ask_yes_no "Continue anyway? (Some features may not work)"; then
+    if ! ask_yes_no "Continue anyway? (Some features may not work)" "n"; then
         exit 1
     fi
+    IS_MACOS=false
 fi
 
 print_step "Checking for Git..."
@@ -208,23 +210,51 @@ if [ "$NEEDS_INSTALL" = true ]; then
     if [ "$HAS_BREW" = false ]; then
         echo ""
         print_warning "Homebrew is not installed. Homebrew is a package manager for macOS."
-        print_info "We need it to install other tools like Bun."
-        echo ""
 
-        if ask_yes_no "Install Homebrew?"; then
-            print_step "Installing Homebrew..."
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        # Check if we're on Linux and already have the required dependencies
+        if [ "$IS_MACOS" = false ] && [ "$HAS_GIT" = true ] && [ "$HAS_BUN" = true ]; then
+            print_info "On Linux with Git and Bun already installed - Homebrew is optional."
+            echo ""
 
-            # Add Homebrew to PATH for this session
-            if [ -f "/opt/homebrew/bin/brew" ]; then
-                eval "$(/opt/homebrew/bin/brew shellenv)"
+            if ask_yes_no "Install Homebrew anyway?" "y"; then
+                print_step "Installing Homebrew..."
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+                # Add Homebrew to PATH for this session
+                if [ -f "/opt/homebrew/bin/brew" ]; then
+                    eval "$(/opt/homebrew/bin/brew shellenv)"
+                elif [ -f "/home/linuxbrew/.linuxbrew/bin/brew" ]; then
+                    eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+                fi
+
+                print_success "Homebrew installed successfully!"
+                HAS_BREW=true
+            else
+                print_info "Skipping Homebrew installation. Continuing with existing tools."
+                HAS_BREW=false
             fi
-
-            print_success "Homebrew installed successfully!"
-            HAS_BREW=true
         else
-            print_error "Homebrew is required to continue. Exiting."
-            exit 1
+            # On macOS or missing dependencies - Homebrew is required
+            print_info "We need it to install other tools like Bun."
+            echo ""
+
+            if ask_yes_no "Install Homebrew?" "y"; then
+                print_step "Installing Homebrew..."
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+                # Add Homebrew to PATH for this session
+                if [ -f "/opt/homebrew/bin/brew" ]; then
+                    eval "$(/opt/homebrew/bin/brew shellenv)"
+                elif [ -f "/home/linuxbrew/.linuxbrew/bin/brew" ]; then
+                    eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+                fi
+
+                print_success "Homebrew installed successfully!"
+                HAS_BREW=true
+            else
+                print_error "Homebrew is required to continue. Exiting."
+                exit 1
+            fi
         fi
     fi
 
@@ -319,7 +349,25 @@ if [ -d "$PAI_DIR/.git" ]; then
     if ask_yes_no "Update to the latest version?"; then
         print_step "Updating PAI..."
         cd "$PAI_DIR"
+
+        # Check if there are local changes
+        if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+            print_info "Stashing local changes before update..."
+            git stash push -m "PAI setup: local changes before update"
+            STASHED=true
+        else
+            STASHED=false
+        fi
+
+        # Pull latest changes
         git pull
+
+        # Restore local changes if we stashed them
+        if [ "$STASHED" = true ]; then
+            print_info "Restoring local changes..."
+            git stash pop
+        fi
+
         print_success "PAI updated successfully!"
     else
         print_info "Using existing installation"
@@ -400,27 +448,27 @@ if [ "$SHOULD_ADD_CONFIG" = true ]; then
     esac
 
     # Add configuration to shell config
-    cat >> "$SHELL_CONFIG" << EOF
-
-# ========== PAI Configuration ==========
-# Personal AI Infrastructure
-# Added by PAI setup script on $(date)
-
-# Where PAI is installed
-export PAI_DIR="$PAI_DIR"
-
-# Your home directory
-export PAI_HOME="\$HOME"
-
-# Your AI assistant's name
-export DA="$AI_NAME"
-
-# Display color
-export DA_COLOR="$AI_COLOR"
-
-# =========================================
-
-EOF
+    {
+        echo ""
+        echo "# ========== PAI Configuration =========="
+        echo "# Personal AI Infrastructure"
+        echo "# Added by PAI setup script on $(date)"
+        echo ""
+        echo "# Where PAI is installed"
+        echo "export PAI_DIR=\"$PAI_DIR\""
+        echo ""
+        echo "# Your home directory"
+        echo "export PAI_HOME=\"\$HOME\""
+        echo ""
+        echo "# Your AI assistant's name"
+        echo "export DA=\"$AI_NAME\""
+        echo ""
+        echo "# Display color"
+        echo "export DA_COLOR=\"$AI_COLOR\""
+        echo ""
+        echo "# ========================================="
+        echo ""
+    } >> "$SHELL_CONFIG"
 
     print_success "Environment variables added to $SHELL_CONFIG"
 else
@@ -577,6 +625,170 @@ if ask_yes_no "Are you using Claude Code?"; then
         print_success "Claude Code configured to use PAI!"
     fi
 
+    # Fix: Replace ${PAI_DIR} with absolute path in settings.json and commands
+    print_step "Verifying hooks configuration..."
+
+    # Check if settings.json uses ${PAI_DIR} variable (needs fixing)
+    if grep -q '${PAI_DIR}' "$PAI_DIR/settings.json" 2>/dev/null; then
+        print_warning "Fixing hook paths in settings.json..."
+
+        # Replace all instances of ${PAI_DIR} with the actual absolute path
+        sed -i "s|\${PAI_DIR}|$PAI_DIR|g" "$PAI_DIR/settings.json"
+
+        print_success "Hook paths fixed in settings.json"
+    fi
+
+    # Also fix ${PAI_DIR} in commands/load-dynamic-requirements.md
+    if [ -f "$PAI_DIR/commands/load-dynamic-requirements.md" ] && grep -q '${PAI_DIR}' "$PAI_DIR/commands/load-dynamic-requirements.md" 2>/dev/null; then
+        print_warning "Fixing paths in load-dynamic-requirements.md..."
+
+        # Replace ${PAI_DIR} with absolute path
+        sed -i "s|\${PAI_DIR}|$PAI_DIR|g" "$PAI_DIR/commands/load-dynamic-requirements.md"
+
+        print_success "Command paths fixed in load-dynamic-requirements.md"
+    fi
+
+    # Fix PAI_DIR environment variable in settings.json env section
+    if command_exists jq; then
+        current_pai_dir=$(jq -r '.env.PAI_DIR // empty' "$PAI_DIR/settings.json" 2>/dev/null)
+        if [ "$current_pai_dir" != "$PAI_DIR" ]; then
+            print_warning "Fixing PAI_DIR environment variable in settings.json..."
+
+            # Update env.PAI_DIR to use absolute path
+            jq --arg pai_dir "$PAI_DIR" '.env.PAI_DIR = $pai_dir' "$PAI_DIR/settings.json" > "$PAI_DIR/settings.json.tmp" && \
+            mv "$PAI_DIR/settings.json.tmp" "$PAI_DIR/settings.json"
+
+            print_success "PAI_DIR environment variable fixed"
+        fi
+
+        # Update DA (AI assistant name) in settings.json
+        current_da=$(jq -r '.env.DA // empty' "$PAI_DIR/settings.json" 2>/dev/null)
+        if [ "$current_da" != "$AI_NAME" ]; then
+            print_warning "Updating AI assistant name in settings.json..."
+
+            jq --arg ai_name "$AI_NAME" '.env.DA = $ai_name' "$PAI_DIR/settings.json" > "$PAI_DIR/settings.json.tmp" && \
+            mv "$PAI_DIR/settings.json.tmp" "$PAI_DIR/settings.json"
+
+            print_success "AI assistant name updated to: $AI_NAME"
+        fi
+
+        # Update DA_COLOR in settings.json
+        current_color=$(jq -r '.env.DA_COLOR // empty' "$PAI_DIR/settings.json" 2>/dev/null)
+        if [ "$current_color" != "$AI_COLOR" ]; then
+            print_warning "Updating AI assistant color in settings.json..."
+
+            jq --arg ai_color "$AI_COLOR" '.env.DA_COLOR = $ai_color' "$PAI_DIR/settings.json" > "$PAI_DIR/settings.json.tmp" && \
+            mv "$PAI_DIR/settings.json.tmp" "$PAI_DIR/settings.json"
+
+            print_success "AI assistant color updated to: $AI_COLOR"
+        fi
+    fi
+
+    # Update PAI.md with the user's chosen AI assistant name and identity assertion
+    if [ -f "$PAI_DIR/PAI.md" ]; then
+        # Check if PAI.md needs identity assertion added
+        if ! grep -q "IMPORTANT: You are" "$PAI_DIR/PAI.md" 2>/dev/null; then
+            print_warning "Adding identity assertion to PAI.md..."
+
+            # Create a temporary file with the new Core Identity section
+            cat > "$PAI_DIR/.pai_identity_tmp" << IDENTITY_EOF
+## Core Identity
+
+This system is your Personal AI Infrastructure (PAI) instance.
+
+**IMPORTANT: You are $AI_NAME, NOT "Claude Code"!**
+
+**Name:** $AI_NAME
+
+**Role:** Personal AI assistant integrated into the development workflow.
+
+**Operating Environment:** Personal AI infrastructure built around Claude Code with Skills-based context management.
+
+**Personality:** Friendly, professional, helpful, proactive.
+
+**Identity Assertion:**
+- When introducing yourself, use: "I'm $AI_NAME, your AI assistant"
+- Do NOT introduce yourself as "Claude Code" unless specifically discussing the underlying platform
+- $AI_NAME is your primary identity in this PAI system
+- You are powered by Claude (Anthropic's AI) but your name is $AI_NAME
+
+---
+IDENTITY_EOF
+
+            # Replace the Core Identity section in PAI.md
+            # First, get the line number where Core Identity starts
+            core_identity_line=$(grep -n "^## Core Identity" "$PAI_DIR/PAI.md" | cut -d: -f1)
+
+            if [ -n "$core_identity_line" ]; then
+                # Find the next --- after Core Identity
+                next_separator_line=$(tail -n +$((core_identity_line + 1)) "$PAI_DIR/PAI.md" | grep -n "^---" | head -1 | cut -d: -f1)
+                next_separator_line=$((core_identity_line + next_separator_line))
+
+                # Create new PAI.md: content before Core Identity + new identity + content after separator
+                {
+                    head -n $((core_identity_line - 1)) "$PAI_DIR/PAI.md"
+                    cat "$PAI_DIR/.pai_identity_tmp"
+                    tail -n +$((next_separator_line + 1)) "$PAI_DIR/PAI.md"
+                } > "$PAI_DIR/.pai_md_tmp"
+
+                mv "$PAI_DIR/.pai_md_tmp" "$PAI_DIR/PAI.md"
+                rm "$PAI_DIR/.pai_identity_tmp"
+
+                print_success "PAI.md updated with AI identity: $AI_NAME"
+            else
+                print_warning "Could not find Core Identity section in PAI.md"
+                rm "$PAI_DIR/.pai_identity_tmp"
+            fi
+        elif grep -q "default: Kai" "$PAI_DIR/PAI.md" 2>/dev/null; then
+            # Simple case: just update the name line
+            print_warning "Updating AI assistant name in PAI.md..."
+            sed -i "s/\*\*Name:\*\* You can customize this (default: Kai)/\*\*Name:\*\* $AI_NAME/" "$PAI_DIR/PAI.md"
+            print_success "PAI.md updated with AI name: $AI_NAME"
+        fi
+    fi
+
+    # Update load-dynamic-requirements.md with the user's chosen AI assistant name
+    if [ -f "$PAI_DIR/commands/load-dynamic-requirements.md" ]; then
+        # Replace hardcoded "Kai" references with the user's chosen name
+        if grep -q "respond like Kai" "$PAI_DIR/commands/load-dynamic-requirements.md" 2>/dev/null; then
+            print_warning "Updating AI name in load-dynamic-requirements.md..."
+
+            # Replace the two Kai references in the conversational section
+            sed -i "s/respond like Kai having a chat/respond like $AI_NAME having a chat/g" "$PAI_DIR/commands/load-dynamic-requirements.md"
+            sed -i "s/You're Kai, their assistant/You're $AI_NAME, their assistant/g" "$PAI_DIR/commands/load-dynamic-requirements.md"
+
+            print_success "load-dynamic-requirements.md updated with AI name: $AI_NAME"
+        fi
+    fi
+
+    # Check if load-dynamic-requirements.ts is missing from UserPromptSubmit
+    if ! grep -q "load-dynamic-requirements.ts" "$PAI_DIR/settings.json" 2>/dev/null; then
+        print_warning "Adding missing load-dynamic-requirements.ts hook..."
+
+        # Use jq to add load-dynamic-requirements.ts to UserPromptSubmit hooks
+        jq --arg pai_dir "$PAI_DIR" '.hooks.UserPromptSubmit[0] = {
+            "matcher": "*",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": ($pai_dir + "/hooks/load-dynamic-requirements.ts")
+                },
+                {
+                    "type": "command",
+                    "command": ($pai_dir + "/hooks/update-tab-titles.ts")
+                }
+            ]
+        }' "$PAI_DIR/settings.json" > "$PAI_DIR/settings.json.tmp" && \
+        mv "$PAI_DIR/settings.json.tmp" "$PAI_DIR/settings.json"
+
+        print_success "Missing hook added!"
+    fi
+
+    # Fix executable permission on load-dynamic-requirements.ts
+    chmod +x "$PAI_DIR/hooks/load-dynamic-requirements.ts" 2>/dev/null
+
+    print_success "Hooks configuration verified"
+
     echo ""
     print_info "Next steps for Claude Code:"
     echo "  1. Download Claude Code from: https://claude.ai/code"
@@ -586,6 +798,55 @@ if ask_yes_no "Are you using Claude Code?"; then
 else
     print_info "For other AI assistants, refer to the documentation:"
     echo "  $PAI_DIR/documentation/how-to-start.md"
+fi
+
+# ============================================
+# Step 8.5: Create Critical Symlinks
+# ============================================
+
+print_header "Step 8.5: Creating Critical Symlinks"
+
+# Create hooks symlink (CRITICAL for hooks to work!)
+print_step "Linking hooks to Claude Code..."
+if [ -L "$HOME/.claude/hooks" ]; then
+    print_info "Hooks already linked to PAI"
+elif [ -d "$HOME/.claude/hooks" ]; then
+    print_warning "Hooks directory already exists"
+    if ask_yes_no "Replace it with PAI's hooks?"; then
+        mv "$HOME/.claude/hooks" "$HOME/.claude/hooks.backup"
+        print_info "Backed up existing hooks to hooks.backup"
+        ln -sf "$PAI_DIR/hooks" "$HOME/.claude/hooks"
+        print_success "Hooks linked to PAI!"
+    fi
+else
+    ln -sf "$PAI_DIR/hooks" "$HOME/.claude/hooks"
+    print_success "Hooks linked to PAI!"
+fi
+
+# Create skills symlink (PAI-global skills)
+print_step "Linking skills to Claude Code..."
+if [ -L "$HOME/.claude/skills" ]; then
+    print_info "Skills already linked to PAI"
+elif [ -d "$HOME/.claude/skills" ]; then
+    print_warning "Skills directory already exists"
+    if ask_yes_no "Replace it with PAI's skills?"; then
+        mv "$HOME/.claude/skills" "$HOME/.claude/skills.backup"
+        print_info "Backed up existing skills to skills.backup"
+        ln -sf "$PAI_DIR/skills" "$HOME/.claude/skills"
+        print_success "Skills linked to PAI!"
+    fi
+else
+    ln -sf "$PAI_DIR/skills" "$HOME/.claude/skills"
+    print_success "Skills linked to PAI!"
+fi
+
+# Create scratchpad directory (required by PAI.md)
+print_step "Creating scratchpad directory..."
+if [ -d "$HOME/.claude/scratchpad" ]; then
+    print_info "Scratchpad directory already exists"
+else
+    mkdir -p "$HOME/.claude/scratchpad"
+    print_success "Scratchpad directory created"
 fi
 
 # ============================================
@@ -641,6 +902,37 @@ elif [ -f "$HOME/.claude/settings.json" ]; then
     print_info "Claude Code settings exist (not linked to PAI)"
 else
     print_info "Claude Code settings not configured"
+fi
+
+# Test 7: Hooks symlink
+if [ -L "$HOME/.claude/hooks" ]; then
+    hooks_target=$(readlink "$HOME/.claude/hooks")
+    if [ "$hooks_target" = "$PAI_DIR/hooks" ]; then
+        print_success "Hooks symlink configured correctly"
+    else
+        print_warning "Hooks symlink points to wrong location: $hooks_target"
+    fi
+else
+    print_warning "Hooks symlink not found (PAI may not work correctly)"
+fi
+
+# Test 8: Skills symlink
+if [ -L "$HOME/.claude/skills" ]; then
+    skills_target=$(readlink "$HOME/.claude/skills")
+    if [ "$skills_target" = "$PAI_DIR/skills" ]; then
+        print_success "Skills symlink configured correctly"
+    else
+        print_warning "Skills symlink points to wrong location: $skills_target"
+    fi
+else
+    print_info "Skills symlink not found (optional)"
+fi
+
+# Test 9: Scratchpad directory
+if [ -d "$HOME/.claude/scratchpad" ]; then
+    print_success "Scratchpad directory exists"
+else
+    print_warning "Scratchpad directory not found"
 fi
 
 # ============================================
